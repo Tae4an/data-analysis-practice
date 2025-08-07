@@ -103,7 +103,7 @@ st.markdown("---")
 st.sidebar.title("분석 메뉴")
 page = st.sidebar.selectbox(
     "분석할 데이터를 선택하세요:",
-    ["홈", "직원 데이터 분석", "매출 데이터 분석", "아보카도 시장 분석", "데이터 업로드"]
+    ["홈", "직원 데이터 분석", "매출 데이터 분석", "아보카도 시장 분석", "아보카도 가격 예측", "데이터 업로드"]
 )
 
 # 홈 페이지
@@ -672,7 +672,7 @@ elif page == "아보카도 시장 분석":
                 
                 fig = px.line(monthly_data, x='date', y='average_price', color='type',
                              title="월별 평균 가격 추이")
-                fig.update_xaxis(tickangle=45)
+                fig.update_xaxes(tickangle=45)
                 st.plotly_chart(fig, use_container_width=True)
             
             with trend_col2:
@@ -819,6 +819,169 @@ elif page == "아보카도 시장 분석":
             
             with download_col2:
                 st.write(f"필터링된 데이터: {len(filtered_df):,}건 | 전체 데이터: {len(df):,}건")
+
+# 아보카도 가격 예측
+elif page == "아보카도 가격 예측":
+    st.header("아보카도 가격 예측 (머신러닝)")
+    st.info("아보카도 데이터로 다양한 회귀 모델을 학습하고, 입력값에 따라 가격을 예측합니다.")
+
+    # 데이터 및 전처리
+    df = load_avocado_data()
+    if df is None:
+        st.error("아보카도 데이터를 불러올 수 없습니다.")
+    else:
+        # 범주형 인코더 준비
+        from sklearn.preprocessing import LabelEncoder
+        le_type = LabelEncoder()
+        le_geography = LabelEncoder()
+        df['type_encoded'] = le_type.fit_transform(df['type'])
+        df['geography_encoded'] = le_geography.fit_transform(df['geography'])
+        df['month'] = df['date'].dt.month
+        df['quarter'] = df['date'].dt.quarter
+        df['day_of_week'] = df['date'].dt.dayofweek
+        # 특성 엔지니어링
+        df['price_volume_ratio'] = df['average_price'] / df['total_volume']
+        df['total_bags_ratio'] = df['total_bags'] / df['total_volume']
+        df['small_bags_ratio'] = df['small_bags'] / df['total_bags']
+        df['large_bags_ratio'] = df['large_bags'] / df['total_bags']
+        df['4046_ratio'] = df['4046'] / df['total_volume']
+        df['4225_ratio'] = df['4225'] / df['total_volume']
+        df['4770_ratio'] = df['4770'] / df['total_volume']
+        ratio_columns = ['price_volume_ratio', 'total_bags_ratio', 'small_bags_ratio',
+                        'large_bags_ratio', '4046_ratio', '4225_ratio', '4770_ratio']
+        for col in ratio_columns:
+            df[col] = df[col].fillna(0)
+            df[col] = df[col].replace([np.inf, -np.inf], 0)
+        # 특성/타겟 준비
+        feature_columns = [
+            'total_volume', '4046', '4225', '4770', 'total_bags', 'small_bags', 'large_bags', 'xlarge_bags',
+            'type_encoded', 'geography_encoded', 'year', 'month', 'quarter', 'day_of_week',
+            'price_volume_ratio', 'total_bags_ratio', 'small_bags_ratio', 'large_bags_ratio',
+            '4046_ratio', '4225_ratio', '4770_ratio'
+        ]
+        X = df[feature_columns]
+        y = df['average_price']
+        # 데이터 분할
+        from sklearn.model_selection import train_test_split, cross_val_score
+        from sklearn.linear_model import LinearRegression, Ridge, Lasso
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # 모델 정의 및 학습
+        models = {
+            'Linear Regression': LinearRegression(),
+            'Ridge Regression': Ridge(alpha=1.0),
+            'Lasso Regression': Lasso(alpha=0.1),
+            'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42)
+        }
+        results = {}
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            mse = mean_squared_error(y_test, y_pred)
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(y_test, y_pred)
+            r2 = r2_score(y_test, y_pred)
+            cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='r2')
+            results[name] = {
+                'model': model,
+                'rmse': rmse,
+                'mae': mae,
+                'r2': r2,
+                'cv_mean': cv_scores.mean(),
+                'cv_std': cv_scores.std()
+            }
+        # 성능 비교 표
+        st.subheader("모델 성능 비교")
+        perf_df = pd.DataFrame([
+            {'모델': k, 'RMSE': v['rmse'], 'MAE': v['mae'], 'R²': v['r2'], 'CV R²': v['cv_mean']} for k, v in results.items()
+        ])
+        st.dataframe(perf_df, use_container_width=True)
+        # 성능 시각화
+        perf_chart = px.bar(perf_df, x='모델', y='R²', color='모델', title="모델별 R² 비교")
+        st.plotly_chart(perf_chart, use_container_width=True)
+        # 특성 중요도 (Random Forest)
+        st.subheader("특성 중요도 (Random Forest 기준)")
+        rf_model = results['Random Forest']['model']
+        importances = rf_model.feature_importances_
+        importance_df = pd.DataFrame({'특성': X.columns, '중요도': importances}).sort_values('중요도', ascending=False)
+        fig = px.bar(importance_df.head(10), x='중요도', y='특성', orientation='h', title="상위 10개 특성 중요도")
+        st.plotly_chart(fig, use_container_width=True)
+        # 사용자 입력 폼
+        st.subheader("아보카도 가격 예측 시뮬레이션")
+        with st.form("predict_form"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                region = st.selectbox("지역(geography)", df['geography'].unique())
+                year = st.selectbox("연도(year)", sorted(df['year'].unique()))
+                month = st.selectbox("월(month)", sorted(df['month'].unique()))
+            with col2:
+                av_type = st.selectbox("타입(type)", df['type'].unique())
+                total_volume = st.number_input("총 거래량(total_volume)", min_value=1000, max_value=1000000, value=100000, step=1000)
+                total_bags = st.number_input("총 포장수(total_bags)", min_value=100, max_value=500000, value=25000, step=100)
+            with col3:
+                small_bags = st.number_input("소형 봉지(small_bags)", min_value=0, max_value=500000, value=15000, step=100)
+                large_bags = st.number_input("대형 봉지(large_bags)", min_value=0, max_value=500000, value=8000, step=100)
+                xlarge_bags = st.number_input("특대형 봉지(xlarge_bags)", min_value=0, max_value=500000, value=2000, step=100)
+            submit = st.form_submit_button("예측하기")
+        if submit:
+            # 품종별 거래량 비율 임의 입력(실제 분석에서는 더 정교하게)
+            v4046 = int(total_volume * 0.3)
+            v4225 = int(total_volume * 0.4)
+            v4770 = int(total_volume * 0.05)
+            quarter = (month-1)//3 + 1
+            day_of_week = 0  # 예시: 월요일
+            # 비율 특성 계산
+            price_volume_ratio = 0.00001
+            total_bags_ratio = total_bags / total_volume if total_volume else 0
+            small_bags_ratio = small_bags / total_bags if total_bags else 0
+            large_bags_ratio = large_bags / total_bags if total_bags else 0
+            v4046_ratio = v4046 / total_volume if total_volume else 0
+            v4225_ratio = v4225 / total_volume if total_volume else 0
+            v4770_ratio = v4770 / total_volume if total_volume else 0
+            # 입력 데이터프레임 생성
+            input_df = pd.DataFrame({
+                'total_volume': [total_volume],
+                '4046': [v4046],
+                '4225': [v4225],
+                '4770': [v4770],
+                'total_bags': [total_bags],
+                'small_bags': [small_bags],
+                'large_bags': [large_bags],
+                'xlarge_bags': [xlarge_bags],
+                'type_encoded': [le_type.transform([av_type])[0]],
+                'geography_encoded': [le_geography.transform([region])[0]],
+                'year': [year],
+                'month': [month],
+                'quarter': [quarter],
+                'day_of_week': [day_of_week],
+                'price_volume_ratio': [price_volume_ratio],
+                'total_bags_ratio': [total_bags_ratio],
+                'small_bags_ratio': [small_bags_ratio],
+                'large_bags_ratio': [large_bags_ratio],
+                '4046_ratio': [v4046_ratio],
+                '4225_ratio': [v4225_ratio],
+                '4770_ratio': [v4770_ratio]
+            })
+            # 예측 (최고 성능 모델)
+            best_model_name = max(results.keys(), key=lambda x: results[x]['r2'])
+            best_model = results[best_model_name]['model']
+            pred_price = best_model.predict(input_df)[0]
+            st.success(f"예측 가격: ${pred_price:.2f} (모델: {best_model_name})")
+            # 실제 데이터와 비교
+            similar = df[(df['geography'] == region) & (df['type'] == av_type) & (df['year'] == year) & (df['month'] == month)]
+            if len(similar) > 0:
+                actual_avg = similar['average_price'].mean()
+                st.info(f"실제 평균 가격: ${actual_avg:.2f} | 예측 오차: ${abs(pred_price-actual_avg):.2f}")
+                # 예측 vs 실제 시각화
+                comp_df = pd.DataFrame({
+                    '구분': ['예측', '실제평균'],
+                    '가격': [pred_price, actual_avg]
+                })
+                fig = px.bar(comp_df, x='구분', y='가격', color='구분', title="예측 vs 실제 가격 비교")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("입력 조건에 해당하는 실제 데이터가 없습니다.")
 
 # 데이터 업로드
 elif page == "데이터 업로드":
